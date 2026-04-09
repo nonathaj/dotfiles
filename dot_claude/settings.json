@@ -4,14 +4,17 @@
     "commit": "",
     "pr": ""
   },
+  "statusLine": {
+    "type": "command",
+    "command": "~/.claude/statusline.sh",
+    "padding": 1
+  },
   "enabledPlugins": {
     "rust-analyzer-lsp@claude-plugins-official": true
   },
   "effortLevel": "medium",
   "skipDangerousModePermissionPrompt": true,
-  "statusLine": {
-    "type": "command",
-    "command": "~/.claude/statusline.sh",
-    "padding": 1
+  "env": {
+    "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"
   }
 }
