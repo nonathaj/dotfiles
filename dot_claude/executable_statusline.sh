@@ -5,6 +5,16 @@
 
 input=$(cat)
 
+# ── ccburn collect (optional) ──
+# If ccburn is installed, feed it a copy of the statusline JSON so its local
+# SQLite DB stays warm with rate_limits data (avoids OAuth API rate limits when
+# ccburn is run interactively). Fire-and-forget; stdout (passthrough) is
+# discarded since we already consumed stdin ourselves.
+if command -v ccburn >/dev/null 2>&1; then
+    (printf '%s' "$input" | ccburn collect >/dev/null 2>&1) &
+    disown 2>/dev/null
+fi
+
 # ── Colors (use $'...' so escapes are expanded at assignment) ──
 RESET=$'\033[0m'
 BOLD=$'\033[1m'
@@ -73,7 +83,7 @@ gather_git() {
     fi
 
     if [ "$stale" -eq 1 ]; then
-        if git -C "$target_dir" rev-parse --git-dir > /dev/null 2>&1; then
+        if timeout 2 git -C "$target_dir" rev-parse --git-dir > /dev/null 2>&1; then
             local branch=$(git -C "$target_dir" branch --show-current 2>/dev/null)
             local staged=$(git -C "$target_dir" diff --cached --numstat 2>/dev/null | wc -l | tr -d ' ')
             local modified=$(git -C "$target_dir" diff --diff-filter=M --numstat 2>/dev/null | wc -l | tr -d ' ')
@@ -94,35 +104,65 @@ gather_git() {
     IFS='|' read -r G_BRANCH G_STAGED G_MODIFIED G_DELETED G_UNTRACKED G_AHEAD G_BEHIND G_REMOTE < "$cache"
 }
 
-# Format a directory line with git info
-# Usage: format_dir_line <directory_path>
-# Reads from G_* variables (call gather_git first)
-format_dir_line() {
-    local dir_path=$1
-    local line="${BLUE}${BOLD}${dir_path}${RESET}"
+# Helper: pad a string to a given visible width
+# Usage: pad <string> <width> → outputs string + spaces
+pad() {
+    local str=$1 width=$2
+    local len=${#str}
+    local padding=""
+    if [ "$width" -gt "$len" ]; then
+        printf -v padding "%$((width - len))s" ""
+    fi
+    echo "${str}${padding}"
+}
 
-    # GitHub repo link (OSC 8 clickable)
-    if [ -n "$G_REMOTE" ]; then
-        local repo_name=$(echo "$G_REMOTE" | sed 's|.*/\([^/]*/[^/]*\)$|\1|')
-        line="${line} ${DIM}│${RESET} ${OSC_OPEN}${G_REMOTE}${BEL}${CYAN}${repo_name}${RESET}${OSC_CLOSE}"
+# Helper: max of two numbers
+max() { [ "$1" -gt "$2" ] && echo "$1" || echo "$2"; }
+
+# Extract repo name from remote URL (org/repo)
+repo_name_from_remote() {
+    echo "$1" | sed 's|.*/\([^/]*/[^/]*\)$|\1|'
+}
+
+# Format a directory line with git info and column widths
+# Usage: format_dir_line <dir> <dir_w> <repo> <remote> <repo_w> <branch> <branch_w> <ahead> <behind> <staged> <modified> <deleted> <untracked>
+format_dir_line() {
+    local dir_path=$1 dir_w=$2
+    local repo=$3 remote=$4 repo_w=$5
+    local branch=$6 branch_w=$7
+    local ahead=$8 behind=$9 staged=${10} modified=${11} deleted=${12} untracked=${13}
+
+    # Padded directory
+    local padded_dir=$(pad "$dir_path" "$dir_w")
+    local line="${BLUE}${BOLD}${padded_dir}${RESET}"
+
+    # Padded repo (clickable link)
+    if [ "$repo_w" -gt 0 ]; then
+        local padded_repo=$(pad "$repo" "$repo_w")
+        if [ -n "$remote" ]; then
+            line="${line} ${DIM}│${RESET} ${OSC_OPEN}${remote}${BEL}${CYAN}${padded_repo}${RESET}${OSC_CLOSE}"
+        else
+            line="${line} ${DIM}│${RESET} ${padded_repo}"
+        fi
     fi
 
-    # Git branch
-    if [ -n "$G_BRANCH" ]; then
-        line="${line} ${DIM}│${RESET} ${MAGENTA}${G_BRANCH}${RESET}"
+    # Padded branch + ahead/behind + status
+    if [ "$branch_w" -gt 0 ]; then
+        local padded_branch=$(pad "$branch" "$branch_w")
+        line="${line} ${DIM}│${RESET} ${MAGENTA}${padded_branch}${RESET}"
 
         # Ahead/behind tracking branch
         local track=""
-        [ "$G_AHEAD" -gt 0 ] 2>/dev/null && track="${track}${GREEN}↑${G_AHEAD}${RESET}"
-        [ "$G_BEHIND" -gt 0 ] 2>/dev/null && track="${track}${RED}↓${G_BEHIND}${RESET}"
+        [ "$ahead" -gt 0 ] 2>/dev/null && track="${track}${GREEN}↑${ahead}${RESET}"
+        [ "$behind" -gt 0 ] 2>/dev/null && track="${track}${RED}↓${behind}${RESET}"
         [ -n "$track" ] && line="${line} ${track}"
 
         # Git status indicators
         local status=""
-        [ "$G_STAGED" -gt 0 ] 2>/dev/null && status="${status} ${GREEN}+${G_STAGED}${RESET}"
-        [ "$G_MODIFIED" -gt 0 ] 2>/dev/null && status="${status} ${YELLOW}~${G_MODIFIED}${RESET}"
-        [ "$G_DELETED" -gt 0 ] 2>/dev/null && status="${status} ${RED}-${G_DELETED}${RESET}"
-        [ "$G_UNTRACKED" -gt 0 ] 2>/dev/null && status="${status} ${DIM}?${G_UNTRACKED}${RESET}"
+        [ "$staged" -gt 0 ] 2>/dev/null && status="${status} ${GREEN}+${staged}${RESET}"
+        [ "$modified" -gt 0 ] 2>/dev/null && status="${status} ${YELLOW}~${modified}${RESET}"
+        [ "$deleted" -gt 0 ] 2>/dev/null && status="${status} ${RED}-${deleted}${RESET}"
+        [ "$untracked" -gt 0 ] 2>/dev/null && status="${status} ${DIM}?${untracked}${RESET}"
 
         if [ -z "$status" ]; then
             line="${line} ${GREEN}✓${RESET}"
@@ -135,13 +175,33 @@ format_dir_line() {
 }
 
 # ── Build directory lines ──
-gather_git "$DIR" "prj"
-PRJ_LINE=$(format_dir_line "$DIR")
-
 CWD_LINE=""
 if [ "$CWD" != "$DIR" ] && [ -n "$CWD" ]; then
+    # Gather git data for both directories
     gather_git "$CWD" "cwd"
-    CWD_LINE=$(format_dir_line "$CWD")
+    CWD_BRANCH=$G_BRANCH; CWD_STAGED=$G_STAGED; CWD_MODIFIED=$G_MODIFIED
+    CWD_DELETED=$G_DELETED; CWD_UNTRACKED=$G_UNTRACKED
+    CWD_AHEAD=$G_AHEAD; CWD_BEHIND=$G_BEHIND; CWD_REMOTE=$G_REMOTE
+    CWD_REPO=""; [ -n "$CWD_REMOTE" ] && CWD_REPO=$(repo_name_from_remote "$CWD_REMOTE")
+
+    gather_git "$DIR" "prj"
+    PRJ_BRANCH=$G_BRANCH; PRJ_STAGED=$G_STAGED; PRJ_MODIFIED=$G_MODIFIED
+    PRJ_DELETED=$G_DELETED; PRJ_UNTRACKED=$G_UNTRACKED
+    PRJ_AHEAD=$G_AHEAD; PRJ_BEHIND=$G_BEHIND; PRJ_REMOTE=$G_REMOTE
+    PRJ_REPO=""; [ -n "$PRJ_REMOTE" ] && PRJ_REPO=$(repo_name_from_remote "$PRJ_REMOTE")
+
+    # Compute column widths (max of both rows)
+    DIR_W=$(max ${#CWD} ${#DIR})
+    REPO_W=$(max ${#CWD_REPO} ${#PRJ_REPO})
+    BRANCH_W=$(max ${#CWD_BRANCH} ${#PRJ_BRANCH})
+
+    CWD_LINE=$(format_dir_line "$CWD" "$DIR_W" "$CWD_REPO" "$CWD_REMOTE" "$REPO_W" "$CWD_BRANCH" "$BRANCH_W" "$CWD_AHEAD" "$CWD_BEHIND" "$CWD_STAGED" "$CWD_MODIFIED" "$CWD_DELETED" "$CWD_UNTRACKED")
+    PRJ_LINE=$(format_dir_line "$DIR" "$DIR_W" "$PRJ_REPO" "$PRJ_REMOTE" "$REPO_W" "$PRJ_BRANCH" "$BRANCH_W" "$PRJ_AHEAD" "$PRJ_BEHIND" "$PRJ_STAGED" "$PRJ_MODIFIED" "$PRJ_DELETED" "$PRJ_UNTRACKED")
+else
+    # Single line — no padding needed
+    gather_git "$DIR" "prj"
+    PRJ_REPO=""; [ -n "$G_REMOTE" ] && PRJ_REPO=$(repo_name_from_remote "$G_REMOTE")
+    PRJ_LINE=$(format_dir_line "$DIR" "0" "$PRJ_REPO" "$G_REMOTE" "0" "$G_BRANCH" "0" "$G_AHEAD" "$G_BEHIND" "$G_STAGED" "$G_MODIFIED" "$G_DELETED" "$G_UNTRACKED")
 fi
 
 # ── Build session line: model | effort | context bar | cost | duration ──
@@ -200,6 +260,42 @@ OUT_LABEL=$(fmt_tokens "$TOTAL_OUT")
 SESSION_LINE="${SESSION_LINE} ${DIM}│${RESET} ${YELLOW}${COST_FMT}${RESET} ${DIM}↑${IN_LABEL} ↓${OUT_LABEL}${RESET}"
 SESSION_LINE="${SESSION_LINE} ${DIM}│${RESET} ${DIM}${DURATION_FMT}${RESET}"
 
+# ── ccburn display line (optional) ──
+# If ccburn is installed, render a single-line usage summary as the bottom row.
+# We use --json (not --compact) and format ourselves so we get real pace
+# emojis and styling consistent with the rest of the statusline. The compact
+# mode only emits ASCII brackets and additionally mis-encodes its separator
+# as CP1252 on Windows.
+CCBURN_LINE=""
+if command -v ccburn >/dev/null 2>&1; then
+    CCBURN_JSON=$(timeout 3 ccburn --once --json 2>/dev/null)
+    if [ -n "$CCBURN_JSON" ]; then
+        CCBURN_LINE=$(echo "$CCBURN_JSON" | jq -r \
+            --arg sep " ${DIM}│${RESET} " \
+            --arg dim "$DIM" \
+            --arg reset "$RESET" '
+            def icon:
+                if . == "behind_pace" then "🧊"
+                elif . == "on_pace" then "🔥"
+                elif . == "ahead_of_pace" then "🚨"
+                else "·" end;
+            def fmt_reset:
+                if .resets_in_minutes != null and .resets_in_minutes > 0 then
+                    (if .resets_in_minutes >= 60
+                        then ((.resets_in_minutes / 60 | floor) | tostring) + "h" + ((.resets_in_minutes % 60) | tostring) + "m"
+                        else (.resets_in_minutes | tostring) + "m" end)
+                elif .resets_in_hours != null and .resets_in_hours > 0 then
+                    (if .resets_in_hours >= 24
+                        then ((.resets_in_hours / 24 | floor) | tostring) + "d" + ((.resets_in_hours - (.resets_in_hours / 24 | floor) * 24) | floor | tostring) + "h"
+                        else (.resets_in_hours | floor | tostring) + "h" end)
+                else "" end;
+            [.limits | to_entries[] |
+                "\(.value.status | icon) \(.key) \((.value.utilization * 100) | round)% \($dim)(\(.value | fmt_reset))\($reset)"
+            ] | join($sep)
+        ' 2>/dev/null)
+    fi
+fi
+
 # ── Output ──
 if [ -n "$CWD_LINE" ]; then
     printf '%s\n' "${DIM}cwd:${RESET} $CWD_LINE"
@@ -208,3 +304,4 @@ else
     printf '%s\n' "$PRJ_LINE"
 fi
 printf '%s\n' "$SESSION_LINE"
+[ -n "$CCBURN_LINE" ] && printf '%s\n' "$CCBURN_LINE"
