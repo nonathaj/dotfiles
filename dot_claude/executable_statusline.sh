@@ -305,3 +305,5 @@ else
 fi
 printf '%s\n' "$SESSION_LINE"
 [ -n "$CCBURN_LINE" ] && printf '%s\n' "$CCBURN_LINE"
+
+exit 0
