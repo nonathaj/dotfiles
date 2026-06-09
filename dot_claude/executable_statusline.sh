@@ -2,17 +2,45 @@
 # Rich statusline for Claude Code
 # When CWD == PRJ: 2 lines (project+git, session info)
 # When CWD != PRJ: 3 lines (cwd+git, project+git, session info)
+#
+# PERFORMANCE NOTE (Windows / Git Bash): process creation here is dominated by
+# Windows Defender scanning each spawn (~0.3-0.5s) AND msys emulating fork() for
+# every `$(...)` command substitution (~0.1-0.2s). A status line that spawns a
+# few dozen processes therefore takes >10s and Claude Code cancels it on the
+# next event, so it never appears. This script is written to minimise spawns:
+#   * ONE jq call parses every field (not a dozen).
+#   * ONE git call per repo gathers branch+ahead/behind+status (not ~8).
+#   * Helper functions set globals instead of echo|$() (no fork per call).
+#   * File reads use bash builtins ($(<f), read) instead of cat.
+#   * ccburn runs at most once per 12s, fully backgrounded.
 
-input=$(cat)
+IFS= read -rd '' input || true   # slurp stdin without spawning `cat`
+NOW=$(date +%s)                  # one clock read, reused by every freshness check below
 
-# ── ccburn collect (optional) ──
-# If ccburn is installed, feed it a copy of the statusline JSON so its local
-# SQLite DB stays warm with rate_limits data (avoids OAuth API rate limits when
-# ccburn is run interactively). Fire-and-forget; stdout (passthrough) is
-# discarded since we already consumed stdin ourselves.
+# ── ccburn (optional) — throttled + fully backgrounded ──
+# ccburn keeps a local SQLite DB warm from the statusline JSON (no API call) and
+# produces a usage summary. Previously a `collect` ran every render AND a
+# synchronous `--once --json` (up to 3s, frequently timing out) ran on the
+# critical path. On a busy agent that starved the status line so it never
+# finished before Claude Code cancelled it. Now ccburn runs AT MOST once per
+# 12s, entirely in the background, writing a display cache the render reads
+# instantly — it can never block or delay the status line.
+# NB: on Windows, msys `timeout` cannot kill a native ccburn.exe that hangs, so
+# a stuck ccburn leaks a process. Throttling bounds how fast those can pile up.
+CCBURN_CACHE="/tmp/claude-statusline-ccburn.json"
 if command -v ccburn >/dev/null 2>&1; then
-    (printf '%s' "$input" | ccburn collect >/dev/null 2>&1) &
-    disown 2>/dev/null
+    _cb_age=999
+    [ -f "${CCBURN_CACHE}.mark" ] && _cb_age=$(( NOW - $(stat -c %Y "${CCBURN_CACHE}.mark" 2>/dev/null || stat -f %m "${CCBURN_CACHE}.mark" 2>/dev/null || echo 0) ))
+    if [ "$_cb_age" -ge 12 ]; then
+        : > "${CCBURN_CACHE}.mark"   # stamp on LAUNCH (not success) so a hung ccburn can't retry-storm
+        (
+            printf '%s' "$input" | ccburn collect >/dev/null 2>&1
+            timeout 6 ccburn --once --json > "${CCBURN_CACHE}.tmp" 2>/dev/null \
+                && mv -f "${CCBURN_CACHE}.tmp" "$CCBURN_CACHE" 2>/dev/null \
+                || rm -f "${CCBURN_CACHE}.tmp" 2>/dev/null
+        ) &
+        disown 2>/dev/null
+    fi
 fi
 
 # ── Colors (use $'...' so escapes are expanded at assignment) ──
@@ -30,101 +58,129 @@ OSC_OPEN=$'\033]8;;'
 OSC_CLOSE=$'\033]8;;\a'
 BEL=$'\a'
 
-# ── Extract JSON fields ──
-MODEL=$(echo "$input" | jq -r '.model.display_name')
-MODEL_ID=$(echo "$input" | jq -r '.model.id')
-DIR=$(echo "$input" | jq -r '.workspace.project_dir')
-CWD=$(echo "$input" | jq -r '.workspace.current_dir')
-COST=$(echo "$input" | jq -r '.cost.total_cost_usd // 0')
-PCT=$(echo "$input" | jq -r '.context_window.used_percentage // 0' | cut -d. -f1)
-CTX_SIZE=$(echo "$input" | jq -r '.context_window.context_window_size // 200000')
-CTX_USED=$(echo "$input" | jq -r '(.context_window.current_usage // {}) | ((.input_tokens // 0) + (.cache_creation_input_tokens // 0) + (.cache_read_input_tokens // 0))')
-TOTAL_IN=$(echo "$input" | jq -r '.context_window.total_input_tokens // 0')
-TOTAL_OUT=$(echo "$input" | jq -r '.context_window.total_output_tokens // 0')
-DURATION_MS=$(echo "$input" | jq -r '.cost.total_duration_ms // 0')
+# ── Extract JSON fields (single jq call — one process spawn, not a dozen) ──
+# We emit ONE FIELD PER LINE — NOT @tsv, which would JSON-escape the backslashes
+# in Windows paths (D:\dev -> D:\\dev). With one value per line, `jq -r` keeps
+# backslashes raw. `tr -d '\r'` strips the CR that native-Windows jq.exe appends
+# to each line; mapfile/read don't strip it the way $() does, which would
+# otherwise corrupt fields and break the numeric/arithmetic handling downstream.
+mapfile -t _F < <(
+    printf '%s' "$input" | jq -r '
+        .model.display_name // "",
+        .model.id // "",
+        .workspace.project_dir // "",
+        .workspace.current_dir // "",
+        (.cost.total_cost_usd // 0),
+        ((.context_window.used_percentage // 0) | floor),
+        (.context_window.context_window_size // 200000),
+        ((.context_window.current_usage // {}) | ((.input_tokens // 0) + (.cache_creation_input_tokens // 0) + (.cache_read_input_tokens // 0))),
+        (.context_window.total_input_tokens // 0),
+        (.context_window.total_output_tokens // 0),
+        (.cost.total_duration_ms // 0)
+    ' | tr -d '\r'
+)
+MODEL=${_F[0]}; MODEL_ID=${_F[1]}; DIR=${_F[2]}; CWD=${_F[3]}
+COST=${_F[4]}; PCT=${_F[5]}; CTX_SIZE=${_F[6]}; CTX_USED=${_F[7]}
+TOTAL_IN=${_F[8]}; TOTAL_OUT=${_F[9]}; DURATION_MS=${_F[10]}
 
 # ── Effort level (read from settings, not in statusline JSON) ──
+# bash builtin read ($(<f)) + regex — avoids a jq process spawn.
 EFFORT=""
 if [ -f "$HOME/.claude/settings.json" ]; then
-    EFFORT=$(jq -r '.effortLevel // empty' "$HOME/.claude/settings.json" 2>/dev/null)
+    _settings=$(<"$HOME/.claude/settings.json")
+    [[ $_settings =~ \"effortLevel\"[[:space:]]*:[[:space:]]*\"([^\"]+)\" ]] && EFFORT="${BASH_REMATCH[1]}"
 fi
 
 # ── Format token counts (200000 → 200K, 1000000 → 1M) ──
+# Sets FMT_OUT (no echo/$()) so callers don't fork a subshell — expensive on msys.
 fmt_tokens() {
     local n=$1
-    if [ "$n" -ge 1000000 ]; then
-        echo "$((n / 1000000))M"
-    elif [ "$n" -ge 1000 ]; then
-        echo "$((n / 1000))K"
-    else
-        echo "$n"
-    fi
+    if   [ "$n" -ge 1000000 ] 2>/dev/null; then FMT_OUT="$((n / 1000000))M"
+    elif [ "$n" -ge 1000 ]    2>/dev/null; then FMT_OUT="$((n / 1000))K"
+    else FMT_OUT="$n"; fi
 }
-CTX_LABEL=$(fmt_tokens "$CTX_SIZE")
-CTX_USED_LABEL=$(fmt_tokens "$CTX_USED")
+fmt_tokens "$CTX_SIZE"; CTX_LABEL=$FMT_OUT
+fmt_tokens "$CTX_USED"; CTX_USED_LABEL=$FMT_OUT
 
 # ── Git info gathering (cached per directory) ──
 CACHE_MAX_AGE=5
 
-# Gather git info for a directory, using a named cache
+# Gather git info for a directory, using a named cache.
+# Cache file format: line 1 = dir it was gathered for, line 2 = pipe-delimited data.
 # Usage: gather_git <directory> <cache_suffix>
 # Sets: G_BRANCH G_STAGED G_MODIFIED G_DELETED G_UNTRACKED G_AHEAD G_BEHIND G_REMOTE
 gather_git() {
-    local target_dir=$1
-    local suffix=$2
+    local target_dir=$1 suffix=$2
     local cache="/tmp/claude-statusline-git-cache-${suffix}"
-    local cache_dir="/tmp/claude-statusline-git-cache-${suffix}-dir"
+    local cached_dir="" cached_data=""
+    if [ -f "$cache" ]; then
+        { IFS= read -r cached_dir; IFS= read -r cached_data; } < "$cache" 2>/dev/null
+    fi
 
     local stale=0
-    if [ ! -f "$cache" ] || [ ! -f "$cache_dir" ] || \
-       [ "$(cat "$cache_dir" 2>/dev/null)" != "$target_dir" ] || \
-       [ $(($(date +%s) - $(stat -c %Y "$cache" 2>/dev/null || stat -f %m "$cache" 2>/dev/null || echo 0))) -gt $CACHE_MAX_AGE ]; then
+    if [ ! -f "$cache" ] || [ "$cached_dir" != "$target_dir" ] || \
+       [ $((NOW - $(stat -c %Y "$cache" 2>/dev/null || stat -f %m "$cache" 2>/dev/null || echo 0))) -gt $CACHE_MAX_AGE ]; then
         stale=1
     fi
 
     if [ "$stale" -eq 1 ]; then
-        if timeout 2 git -C "$target_dir" rev-parse --git-dir > /dev/null 2>&1; then
-            local branch=$(git -C "$target_dir" branch --show-current 2>/dev/null)
-            local staged=$(git -C "$target_dir" diff --cached --numstat 2>/dev/null | wc -l | tr -d ' ')
-            local modified=$(git -C "$target_dir" diff --diff-filter=M --numstat 2>/dev/null | wc -l | tr -d ' ')
-            local deleted=$(git -C "$target_dir" diff --diff-filter=D --numstat 2>/dev/null | wc -l | tr -d ' ')
-            local untracked=$(git -C "$target_dir" ls-files --others --exclude-standard 2>/dev/null | wc -l | tr -d ' ')
-            local ab=$(git -C "$target_dir" rev-list --left-right --count HEAD...@{upstream} 2>/dev/null || echo "0	0")
-            local ahead=$(echo "$ab" | cut -f1)
-            local behind=$(echo "$ab" | cut -f2)
-            local remote=$(git -C "$target_dir" remote get-url origin 2>/dev/null | sed 's/git@github\.com:/https:\/\/github.com\//' | sed 's/\.git$//')
-            echo "${branch}|${staged}|${modified}|${deleted}|${untracked}|${ahead}|${behind}|${remote}" > "$cache"
-            echo "$target_dir" > "$cache_dir"
+        local status_out branch="" ahead=0 behind=0 staged=0 modified=0 deleted=0 untracked=0 remote=""
+        if status_out=$(timeout 3 git -C "$target_dir" status --porcelain=v2 --branch 2>/dev/null); then
+            # Parse branch, ahead/behind AND all file states from ONE git call
+            # (was ~8). On Windows each git spawn is ~0.3-0.5s, so the worktree
+            # case (cwd!=prj => two repos => ~16 spawns => >10s) is what blew
+            # past Claude Code's render window and made the status line vanish.
+            status_out="${status_out//$'\r'/}"   # native git may emit CRLF
+            local line xy ab
+            while IFS= read -r line; do
+                case "$line" in
+                    "# branch.head "*) branch="${line#\# branch.head }" ;;
+                    "# branch.ab "*)
+                        ab="${line#\# branch.ab }"
+                        ahead="${ab%% *}"; ahead="${ahead#+}"
+                        behind="${ab##* }"; behind="${behind#-}"
+                        ;;
+                    "1 "*|"2 "*)
+                        xy="${line:2:2}"
+                        [ "${xy:0:1}" != "." ] && staged=$((staged+1))
+                        [ "${xy:1:1}" = "M" ] && modified=$((modified+1))
+                        [ "${xy:1:1}" = "D" ] && deleted=$((deleted+1))
+                        ;;
+                    "? "*) untracked=$((untracked+1)) ;;
+                esac
+            done <<< "$status_out"
+            [ "$branch" = "(detached)" ] && branch=""
+            remote=$(git -C "$target_dir" remote get-url origin 2>/dev/null)
+            remote="${remote/git@github.com:/https://github.com/}"; remote="${remote%.git}"
+            cached_data="${branch}|${staged}|${modified}|${deleted}|${untracked}|${ahead}|${behind}|${remote}"
         else
-            echo "|||||||" > "$cache"
-            echo "$target_dir" > "$cache_dir"
+            cached_data="|||||||"
         fi
+        printf '%s\n%s\n' "$target_dir" "$cached_data" > "$cache"
     fi
 
-    IFS='|' read -r G_BRANCH G_STAGED G_MODIFIED G_DELETED G_UNTRACKED G_AHEAD G_BEHIND G_REMOTE < "$cache"
+    IFS='|' read -r G_BRANCH G_STAGED G_MODIFIED G_DELETED G_UNTRACKED G_AHEAD G_BEHIND G_REMOTE <<< "$cached_data"
 }
 
-# Helper: pad a string to a given visible width
-# Usage: pad <string> <width> → outputs string + spaces
+# Helper: pad a string to a given visible width. Sets PAD_OUT (no echo/$()).
 pad() {
-    local str=$1 width=$2
-    local len=${#str}
-    local padding=""
+    local str=$1 width=$2 len=${#1}
     if [ "$width" -gt "$len" ]; then
-        printf -v padding "%$((width - len))s" ""
+        local p; printf -v p "%$((width - len))s" ""
+        PAD_OUT="${str}${p}"
+    else
+        PAD_OUT="$str"
     fi
-    echo "${str}${padding}"
 }
 
-# Helper: max of two numbers
-max() { [ "$1" -gt "$2" ] && echo "$1" || echo "$2"; }
-
-# Extract repo name from remote URL (org/repo)
+# Extract repo name (org/repo) from a remote URL. Sets REPO_NAME (no sed/$()).
 repo_name_from_remote() {
-    echo "$1" | sed 's|.*/\([^/]*/[^/]*\)$|\1|'
+    local u=${1%/}
+    local head=${u%/*}
+    REPO_NAME="${head##*/}/${u##*/}"
 }
 
-# Format a directory line with git info and column widths
+# Format a directory line with git info and column widths. Sets FMT_DIR_LINE.
 # Usage: format_dir_line <dir> <dir_w> <repo> <remote> <repo_w> <branch> <branch_w> <ahead> <behind> <staged> <modified> <deleted> <untracked>
 format_dir_line() {
     local dir_path=$1 dir_w=$2
@@ -133,12 +189,12 @@ format_dir_line() {
     local ahead=$8 behind=$9 staged=${10} modified=${11} deleted=${12} untracked=${13}
 
     # Padded directory
-    local padded_dir=$(pad "$dir_path" "$dir_w")
+    pad "$dir_path" "$dir_w"; local padded_dir=$PAD_OUT
     local line="${BLUE}${BOLD}${padded_dir}${RESET}"
 
     # Padded repo (clickable link)
     if [ "$repo_w" -gt 0 ]; then
-        local padded_repo=$(pad "$repo" "$repo_w")
+        pad "$repo" "$repo_w"; local padded_repo=$PAD_OUT
         if [ -n "$remote" ]; then
             line="${line} ${DIM}│${RESET} ${OSC_OPEN}${remote}${BEL}${CYAN}${padded_repo}${RESET}${OSC_CLOSE}"
         else
@@ -148,7 +204,7 @@ format_dir_line() {
 
     # Padded branch + ahead/behind + status
     if [ "$branch_w" -gt 0 ]; then
-        local padded_branch=$(pad "$branch" "$branch_w")
+        pad "$branch" "$branch_w"; local padded_branch=$PAD_OUT
         line="${line} ${DIM}│${RESET} ${MAGENTA}${padded_branch}${RESET}"
 
         # Ahead/behind tracking branch
@@ -171,7 +227,7 @@ format_dir_line() {
         fi
     fi
 
-    echo "$line"
+    FMT_DIR_LINE="$line"
 }
 
 # ── Build directory lines ──
@@ -182,26 +238,26 @@ if [ "$CWD" != "$DIR" ] && [ -n "$CWD" ]; then
     CWD_BRANCH=$G_BRANCH; CWD_STAGED=$G_STAGED; CWD_MODIFIED=$G_MODIFIED
     CWD_DELETED=$G_DELETED; CWD_UNTRACKED=$G_UNTRACKED
     CWD_AHEAD=$G_AHEAD; CWD_BEHIND=$G_BEHIND; CWD_REMOTE=$G_REMOTE
-    CWD_REPO=""; [ -n "$CWD_REMOTE" ] && CWD_REPO=$(repo_name_from_remote "$CWD_REMOTE")
+    CWD_REPO=""; [ -n "$CWD_REMOTE" ] && { repo_name_from_remote "$CWD_REMOTE"; CWD_REPO=$REPO_NAME; }
 
     gather_git "$DIR" "prj"
     PRJ_BRANCH=$G_BRANCH; PRJ_STAGED=$G_STAGED; PRJ_MODIFIED=$G_MODIFIED
     PRJ_DELETED=$G_DELETED; PRJ_UNTRACKED=$G_UNTRACKED
     PRJ_AHEAD=$G_AHEAD; PRJ_BEHIND=$G_BEHIND; PRJ_REMOTE=$G_REMOTE
-    PRJ_REPO=""; [ -n "$PRJ_REMOTE" ] && PRJ_REPO=$(repo_name_from_remote "$PRJ_REMOTE")
+    PRJ_REPO=""; [ -n "$PRJ_REMOTE" ] && { repo_name_from_remote "$PRJ_REMOTE"; PRJ_REPO=$REPO_NAME; }
 
-    # Compute column widths (max of both rows)
-    DIR_W=$(max ${#CWD} ${#DIR})
-    REPO_W=$(max ${#CWD_REPO} ${#PRJ_REPO})
-    BRANCH_W=$(max ${#CWD_BRANCH} ${#PRJ_BRANCH})
+    # Compute column widths (max of both rows) — inlined, no subshell fork
+    DIR_W=${#CWD};           [ ${#DIR} -gt "$DIR_W" ]           && DIR_W=${#DIR}
+    REPO_W=${#CWD_REPO};     [ ${#PRJ_REPO} -gt "$REPO_W" ]     && REPO_W=${#PRJ_REPO}
+    BRANCH_W=${#CWD_BRANCH}; [ ${#PRJ_BRANCH} -gt "$BRANCH_W" ] && BRANCH_W=${#PRJ_BRANCH}
 
-    CWD_LINE=$(format_dir_line "$CWD" "$DIR_W" "$CWD_REPO" "$CWD_REMOTE" "$REPO_W" "$CWD_BRANCH" "$BRANCH_W" "$CWD_AHEAD" "$CWD_BEHIND" "$CWD_STAGED" "$CWD_MODIFIED" "$CWD_DELETED" "$CWD_UNTRACKED")
-    PRJ_LINE=$(format_dir_line "$DIR" "$DIR_W" "$PRJ_REPO" "$PRJ_REMOTE" "$REPO_W" "$PRJ_BRANCH" "$BRANCH_W" "$PRJ_AHEAD" "$PRJ_BEHIND" "$PRJ_STAGED" "$PRJ_MODIFIED" "$PRJ_DELETED" "$PRJ_UNTRACKED")
+    format_dir_line "$CWD" "$DIR_W" "$CWD_REPO" "$CWD_REMOTE" "$REPO_W" "$CWD_BRANCH" "$BRANCH_W" "$CWD_AHEAD" "$CWD_BEHIND" "$CWD_STAGED" "$CWD_MODIFIED" "$CWD_DELETED" "$CWD_UNTRACKED"; CWD_LINE=$FMT_DIR_LINE
+    format_dir_line "$DIR" "$DIR_W" "$PRJ_REPO" "$PRJ_REMOTE" "$REPO_W" "$PRJ_BRANCH" "$BRANCH_W" "$PRJ_AHEAD" "$PRJ_BEHIND" "$PRJ_STAGED" "$PRJ_MODIFIED" "$PRJ_DELETED" "$PRJ_UNTRACKED"; PRJ_LINE=$FMT_DIR_LINE
 else
     # Single line — no padding needed
     gather_git "$DIR" "prj"
-    PRJ_REPO=""; [ -n "$G_REMOTE" ] && PRJ_REPO=$(repo_name_from_remote "$G_REMOTE")
-    PRJ_LINE=$(format_dir_line "$DIR" "0" "$PRJ_REPO" "$G_REMOTE" "0" "$G_BRANCH" "0" "$G_AHEAD" "$G_BEHIND" "$G_STAGED" "$G_MODIFIED" "$G_DELETED" "$G_UNTRACKED")
+    PRJ_REPO=""; [ -n "$G_REMOTE" ] && { repo_name_from_remote "$G_REMOTE"; PRJ_REPO=$REPO_NAME; }
+    format_dir_line "$DIR" "0" "$PRJ_REPO" "$G_REMOTE" "0" "$G_BRANCH" "0" "$G_AHEAD" "$G_BEHIND" "$G_STAGED" "$G_MODIFIED" "$G_DELETED" "$G_UNTRACKED"; PRJ_LINE=$FMT_DIR_LINE
 fi
 
 # ── Build session line: model | effort | context bar | cost | duration ──
@@ -220,12 +276,12 @@ if [ "$FILLED" -gt 0 ]; then
     BAR="${FILL// /█}"
 fi
 if [ "$EMPTY" -gt 0 ]; then
-    printf -v PAD "%${EMPTY}s"
-    BAR="${BAR}${PAD// /░}"
+    printf -v PADBAR "%${EMPTY}s"
+    BAR="${BAR}${PADBAR// /░}"
 fi
 
-# Cost
-COST_FMT=$(printf '$%.2f' "$COST")
+# Cost (printf -v — builtin, no subshell fork)
+printf -v COST_FMT '$%.2f' "$COST" 2>/dev/null
 
 # Duration
 TOTAL_SECS=$((DURATION_MS / 1000))
@@ -255,21 +311,22 @@ fi
 SESSION_LINE="${CYAN}${MODEL}${RESET}"
 [ -n "$EFFORT_DISPLAY" ] && SESSION_LINE="${SESSION_LINE} ${EFFORT_DISPLAY}"
 SESSION_LINE="${SESSION_LINE} ${DIM}│${RESET} ${BAR_COLOR}${BAR}${RESET} ${PCT}% ${DIM}${CTX_USED_LABEL}/${CTX_LABEL}${RESET}"
-IN_LABEL=$(fmt_tokens "$TOTAL_IN")
-OUT_LABEL=$(fmt_tokens "$TOTAL_OUT")
+fmt_tokens "$TOTAL_IN";  IN_LABEL=$FMT_OUT
+fmt_tokens "$TOTAL_OUT"; OUT_LABEL=$FMT_OUT
 SESSION_LINE="${SESSION_LINE} ${DIM}│${RESET} ${YELLOW}${COST_FMT}${RESET} ${DIM}↑${IN_LABEL} ↓${OUT_LABEL}${RESET}"
 SESSION_LINE="${SESSION_LINE} ${DIM}│${RESET} ${DIM}${DURATION_FMT}${RESET}"
 
 # ── ccburn display line (optional) ──
-# If ccburn is installed, render a single-line usage summary as the bottom row.
-# We use --json (not --compact) and format ourselves so we get real pace
-# emojis and styling consistent with the rest of the statusline. The compact
-# mode only emits ASCII brackets and additionally mis-encodes its separator
-# as CP1252 on Windows.
+# Render a single-line usage summary as the bottom row. We use --json (not
+# --compact) and format ourselves so we get real pace emojis and styling
+# consistent with the rest of the statusline. The compact mode only emits ASCII
+# brackets and additionally mis-encodes its separator as CP1252 on Windows.
+# This block only READS the cache written by the throttled background job at the
+# TOP of this script — it never spawns ccburn, so it adds no latency.
 CCBURN_LINE=""
-if command -v ccburn >/dev/null 2>&1; then
-    CCBURN_JSON=$(timeout 3 ccburn --once --json 2>/dev/null)
-    if [ -n "$CCBURN_JSON" ]; then
+CCBURN_JSON=""
+[ -n "$CCBURN_CACHE" ] && [ -f "$CCBURN_CACHE" ] && CCBURN_JSON=$(<"$CCBURN_CACHE")
+if [ -n "$CCBURN_JSON" ]; then
         CCBURN_LINE=$(echo "$CCBURN_JSON" | jq -r \
             --arg sep " ${DIM}│${RESET} " \
             --arg dim "$DIM" \
@@ -293,7 +350,6 @@ if command -v ccburn >/dev/null 2>&1; then
                 "\(.value.status | icon) \(.key) \((.value.utilization * 100) | round)% \($dim)(\(.value | fmt_reset))\($reset)"
             ] | join($sep)
         ' 2>/dev/null)
-    fi
 fi
 
 # ── Output ──
@@ -306,4 +362,6 @@ fi
 printf '%s\n' "$SESSION_LINE"
 [ -n "$CCBURN_LINE" ] && printf '%s\n' "$CCBURN_LINE"
 
+# Always exit 0: the `&&` above returns non-zero when there is no ccburn line,
+# and Claude Code blanks the status line on any non-zero exit.
 exit 0
