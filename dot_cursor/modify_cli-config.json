@@ -1,0 +1,12 @@
+{{- /* chezmoi:modify-template */ -}}
+{{- /* Set only statusLine; preserve Cursor's other runtime keys. Linux/macOS -> run .sh via shebang; Windows -> Git Bash wrapper (.cmd). */ -}}
+{{- $cfg := dict -}}
+{{- if .chezmoi.stdin -}}
+{{- $cfg = fromJson .chezmoi.stdin -}}
+{{- end -}}
+{{- $command := printf "%s/.cursor/statusline.sh" .chezmoi.homeDir -}}
+{{- if eq .chezmoi.os "windows" -}}
+{{-   $command = printf "%s\\.cursor\\statusline.cmd" (replace "/" "\\" .chezmoi.homeDir) -}}
+{{- end -}}
+{{- $statusLine := dict "type" "command" "command" $command "padding" 1 "timeoutMs" 10000 -}}
+{{- $cfg | setValueAtPath "statusLine" $statusLine | toPrettyJson -}}

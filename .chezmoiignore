@@ -1,6 +1,7 @@
 {{ if ne .chezmoi.os "windows" }}
 AppData
 .gemini/antigravity-cli/statusline.cmd
+.cursor/statusline.cmd
 {{ end }}
 {{ if ne .chezmoi.os "linux" }}
 .config/Code
