@@ -1,0 +1,12 @@
+{{- /* chezmoi:modify-template */ -}}
+{{- /* Set only statusLine; preserve agy's other runtime keys (colorScheme, trustedWorkspaces, ...). Windows -> Git Bash wrapper (cmd.exe can't exec *.sh); else -> run the .sh directly via its executable_ bit + shebang. */ -}}
+{{- $cfg := dict -}}
+{{- if .chezmoi.stdin -}}
+{{- $cfg = fromJson .chezmoi.stdin -}}
+{{- end -}}
+{{- $command := printf "%s/.gemini/antigravity-cli/statusline.sh" .chezmoi.homeDir -}}
+{{- if eq .chezmoi.os "windows" -}}
+{{-   $command = printf "%s\\.gemini\\antigravity-cli\\statusline.cmd" (replace "/" "\\" .chezmoi.homeDir) -}}
+{{- end -}}
+{{- $statusLine := dict "type" "command" "command" $command "enabled" true -}}
+{{- $cfg | setValueAtPath "statusLine" $statusLine | toPrettyJson -}}
