@@ -347,7 +347,7 @@ if [ -n "$CCBURN_JSON" ]; then
                         else (.resets_in_hours | floor | tostring) + "h" end)
                 else "" end;
             [.limits | to_entries[] |
-                "\(.value.status | icon) \(.key) \((.value.utilization * 100) | round)% \($dim)(\(.value | fmt_reset))\($reset)"
+                "\(.value.status | icon) \(.key | if . == "session" then "5hr" else . end) \((.value.utilization * 100) | round)% \($dim)(\(.value | fmt_reset))\($reset)"
             ] | join($sep)
         ' 2>/dev/null)
 fi
@@ -360,7 +360,7 @@ else
     printf '%s\n' "$PRJ_LINE"
 fi
 printf '%s\n' "$SESSION_LINE"
-[ -n "$CCBURN_LINE" ] && printf '%s\n' "$CCBURN_LINE"
+[ -n "$CCBURN_LINE" ] && printf '%s\n' "${DIM}Limits:${RESET} $CCBURN_LINE"
 
 # Always exit 0: the `&&` above returns non-zero when there is no ccburn line,
 # and Claude Code blanks the status line on any non-zero exit.
