@@ -59,6 +59,22 @@ Shared bash scripts (Claude Code, Cursor CLI, Antigravity CLI). Layout matches C
 
 **Windows:** Cursor and Antigravity use a `statusline.cmd` wrapper that finds Git Bash dynamically; bare `.sh` paths open in VS Code or fail under PowerShell.
 
+## tmux / psmux
+
+One shared config drives both [tmux](https://github.com/tmux/tmux) (Linux/macOS) and
+[psmux](https://github.com/psmux/psmux) (native Windows tmux). The body lives in
+`.chezmoitemplates/tmux.conf`; two thin wrappers include it and route to each OS's
+config path. OS-specific bits (shell, clipboard, reload path) are gated inside the
+shared body with `{{ if eq .chezmoi.os "windows" }}`.
+
+| Platform | Target file | Source |
+|----------|-------------|--------|
+| Windows (psmux) | `~/.psmux.conf` | `dot_psmux.conf.tmpl` → `.chezmoitemplates/tmux.conf` |
+| Linux/macOS (tmux) | `~/.config/tmux/tmux.conf` | `dot_config/tmux/tmux.conf.tmpl` → `.chezmoitemplates/tmux.conf` |
+
+**Edit the shared config:** change `.chezmoitemplates/tmux.conf`, then `chezmoi apply`.
+Reload a running session with `prefix + r`.
+
 ## Add a new file
 
 ```bash

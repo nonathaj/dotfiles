@@ -2,7 +2,11 @@
 AppData
 .gemini/antigravity-cli/statusline.cmd
 .cursor/statusline.cmd
+.psmux.conf
 {{ end }}
 {{ if ne .chezmoi.os "linux" }}
 .config/Code
+{{ end }}
+{{ if eq .chezmoi.os "windows" }}
+.config/tmux
 {{ end }}
