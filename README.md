@@ -75,6 +75,48 @@ shared body with `{{ if eq .chezmoi.os "windows" }}`.
 **Edit the shared config:** change `.chezmoitemplates/tmux.conf`, then `chezmoi apply`.
 Reload a running session with `prefix + r`.
 
+### Gotcha: no trailing comments on values
+
+psmux parses the *entire rest of the line* as an option's value, so this silently
+sets `escape-time` to the invalid string `10 # snappier`, and the setting never applies:
+
+```tmux
+set -g escape-time 10   # snappier   <-- BROKEN on psmux
+```
+
+Keep comments on their own line. Real tmux tolerates trailing comments; psmux does not.
+Note that psmux only warns on *unknown* options — a bad *value* on a known option is a
+quiet no-op. Verify with `psmux new-session -d -s t; psmux show-options -g`
+(`psmux -f <file> start-server` does **not** surface config warnings).
+
+### Plugins
+
+`prefix + I` install · `prefix + U` update · `prefix + M` clean ·
+`prefix + C-s` save session · `prefix + C-r` restore session
+
+Plugins are declared once in the shared config; the namespace and bootstrap path are
+resolved per-OS by template (`tmux-plugins/tmux-*` + tpm on Linux,
+`psmux-plugins/psmux-*` + ppm on Windows). psmux's plugins are PowerShell
+reimplementations that live in the `psmux/psmux-plugins` monorepo.
+
+**One-time bootstrap per machine** (the plugin manager can't install itself):
+
+```bash
+# Linux/macOS
+git clone https://github.com/tmux-plugins/tpm ~/.tmux/plugins/tpm
+```
+
+```powershell
+# Windows
+git clone https://github.com/psmux/psmux-plugins.git "$env:TEMP\psmux-plugins"
+Copy-Item "$env:TEMP\psmux-plugins\ppm" "$env:USERPROFILE\.psmux\plugins\ppm" -Recurse
+Remove-Item "$env:TEMP\psmux-plugins" -Recurse -Force
+```
+
+Then start a session and press `prefix + I`. Until the manager is bootstrapped, the
+`run` line fails **silently** and plugins are inert no-ops — a missing manager looks
+identical to a working config.
+
 ## Add a new file
 
 ```bash
