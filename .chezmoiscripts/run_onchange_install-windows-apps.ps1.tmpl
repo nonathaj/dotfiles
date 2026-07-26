@@ -1,0 +1,28 @@
+{{ if eq .chezmoi.os "windows" -}}
+$ErrorActionPreference = "Stop"
+
+$packages = @(
+    "JuanjoFuchs.ccburn"
+    "GitHub.cli"
+    "Neovim.Neovim"
+    "CoreyButler.NVMforWindows"
+    "PuTTY.PuTTY"
+    "Plex.Plexamp"
+    "Git.Git"
+    "GitHub.GitLFS"
+    "twpayne.chezmoi"
+)
+
+foreach ($id in $packages) {
+    $installed = winget list --id $id --exact --accept-source-agreements 2>$null |
+        Select-String -Pattern ([regex]::Escape($id))
+
+    if ($installed) {
+        Write-Host "Already installed: $id"
+        continue
+    }
+
+    Write-Host "Installing: $id"
+    winget install --id $id --exact --silent --accept-source-agreements --accept-package-agreements
+}
+{{ end -}}

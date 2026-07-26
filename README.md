@@ -45,6 +45,10 @@ chezmoi git -- commit -m "describe your change"
 chezmoi git -- push
 ```
 
+## Windows app installs
+
+`.chezmoiscripts/run_onchange_install-windows-apps.ps1.tmpl` installs a list of winget packages. It reruns automatically via `chezmoi apply`/`chezmoi update` whenever the script changes, and is idempotent (skips packages that are already installed), so it's safe to rerun any time.
+
 ## Status lines
 
 Shared bash scripts (Claude Code, Cursor CLI, Antigravity CLI). Layout matches Claude Code: project/git lines + session info (context bar, tokens). Claude adds ccburn usage limits when installed.
