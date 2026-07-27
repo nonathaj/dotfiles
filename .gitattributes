@@ -1,6 +1,10 @@
 * text=auto
 *.sh text eol=lf
 *.cmd text eol=crlf
+# herdr-lazy rewrites these on every sync; pin LF so a sync on Windows and one
+# on macOS do not churn the diff. (It parses CRLF fine — this is about the repo.)
+herdr/plugins.list text eol=lf
+herdr/plugins.lock text eol=lf
 # tmux/psmux configs must stay LF so chezmoi emits deterministic output cross-OS
 .chezmoitemplates/tmux.conf text eol=lf
 dot_psmux.conf.tmpl text eol=lf

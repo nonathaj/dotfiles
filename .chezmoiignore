@@ -1,3 +1,8 @@
+# Not a dotfile: herdr-lazy owns this directory and reads/writes it in place via
+# HERDR_LAZY_LIST. It lives here to be versioned with the rest of the dotfiles,
+# but chezmoi must never render it into $HOME.
+herdr
+
 {{ if ne .chezmoi.os "windows" }}
 AppData
 .gemini/antigravity-cli/statusline.cmd
