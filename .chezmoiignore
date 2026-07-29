@@ -3,6 +3,11 @@
 # but chezmoi must never render it into $HOME.
 herdr
 
+# Crash dumps. MSYS/Cygwin bash drops these in whatever directory it died in, so
+# one landing in the source tree would otherwise be deployed to every machine.
+# .gitignore keeps them out of the repo; this keeps them out of $HOME.
+*.stackdump
+
 {{ if ne .chezmoi.os "windows" }}
 AppData
 .gemini/antigravity-cli/statusline.cmd

@@ -1,0 +1,5 @@
+# MSYS/Cygwin bash writes a crash dump into whatever directory it died in. One of
+# these was committed and then deployed to $HOME on every machine, so keep them
+# out of the repo. .chezmoiignore covers the other half: not deploying one that
+# happens to be sitting in the source tree.
+*.stackdump
