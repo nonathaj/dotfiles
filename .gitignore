@@ -3,3 +3,9 @@
 # out of the repo. .chezmoiignore covers the other half: not deploying one that
 # happens to be sitting in the source tree.
 *.stackdump
+
+# herdr-lazy rewrites this on every sync. The plugin *list* is the single
+# authority for what should be installed; the resolved commits are local tool
+# state, not intent, and pinning them would make `sync` revert plugins to old
+# commits instead of taking what is current.
+herdr/plugins.lock

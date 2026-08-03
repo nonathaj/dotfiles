@@ -1,0 +1,10 @@
+# herdr local configuration.
+#
+# Opens the herdr-lazy manage pane. The action id is platform-specific —
+# `herdr-lazy.manage` on Linux/macOS, `herdr-lazy.manage-windows` on Windows —
+# because herdr rejects duplicate action ids even across platforms that cannot
+# overlap. See ~/.local/share/chezmoi/herdr/README.md.
+
+[[keys.command]]
+key = "prefix+shift+L"
+command = "herdr-lazy.manage{{ if eq .chezmoi.os "windows" }}-windows{{ end }}"

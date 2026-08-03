@@ -1,0 +1,13 @@
+# Point herdr-lazy at the plugin list versioned in the chezmoi source repo.
+#
+# That file is deliberately not deployed to $HOME (see .chezmoiignore): herdr-lazy
+# rewrites it in place, so a deployed copy would show up as chezmoi drift on every
+# plugin change. Pointing the env var at the source tree is the documented way to
+# wire it up — see herdr/README.md.
+#
+# Managed by chezmoi. Edit dot_config/shell/herdr.sh.tmpl in the source repo, not
+# this copy. Source it from your shell rc:
+#
+#     [ -f ~/.config/shell/herdr.sh ] && . ~/.config/shell/herdr.sh
+#
+export HERDR_LAZY_LIST="{{ .chezmoi.sourceDir }}/herdr/plugins.list"
