@@ -5,6 +5,8 @@
 # because herdr rejects duplicate action ids even across platforms that cannot
 # overlap. See ~/.local/share/chezmoi/herdr/README.md.
 
+onboarding = false
+
 [[keys.command]]
 key = "prefix+shift+L"
 command = "herdr-lazy.manage{{ if eq .chezmoi.os "windows" }}-windows{{ end }}"
