@@ -1,0 +1,19 @@
+{{- /* chezmoi:modify-template */ -}}
+{{- /* Set only statusLine; preserve omp's other runtime keys (modelRoles, setupVersion, shellPath, theme, ...). omp has no external statusline command hook — its status line is native preset/segment config, so this mirrors the ~/.claude/statusline.sh layout (model+thinking | path+git | context % | tokens | session) as a custom preset. */ -}}
+{{- $cfg := dict -}}
+{{- if .chezmoi.stdin -}}
+{{- $cfg = fromYaml .chezmoi.stdin -}}
+{{- end -}}
+{{- $statusLine := dict
+	"preset" "custom"
+	"separator" "pipe"
+	"transparent" true
+	"leftSegments" (list "pi" "model" "mode" "collab" "path" "git" "pr" "subagents")
+	"rightSegments" (list "session_name" "token_in" "token_out" "cache_hit" "cost" "context_pct" "time_spent")
+	"segmentOptions" (dict
+		"model" (dict "showThinkingLevel" true)
+		"path" (dict "abbreviate" true "maxLength" 50 "stripWorkPrefix" true)
+		"git" (dict "showBranch" true "showStaged" true "showUnstaged" true "showUntracked" true)
+	)
+-}}
+{{- $cfg | setValueAtPath "statusLine" $statusLine | toYaml -}}
