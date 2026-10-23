@@ -6,7 +6,7 @@
   },
   "statusLine": {
     "type": "command",
-    "command": "~/.claude/statusline.sh",
+    "command": "node ~/.claude/statusline.cjs",
     "padding": 1
   },
   "enabledPlugins": {
@@ -14,6 +14,7 @@
   },
   "effortLevel": "medium",
   "skipDangerousModePermissionPrompt": true,
+  "autoCompactWindow": 500000,
   "env": {
     "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"
   },

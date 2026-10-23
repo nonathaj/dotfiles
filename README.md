@@ -32,11 +32,11 @@ chezmoi update
 
 ## Push local changes to the repo
 
-After editing a managed file (e.g. `~/.claude/statusline.sh` or `~/.cursor/statusline.sh`):
+After editing a managed file (e.g. `~/.claude/statusline.cjs` or `~/.cursor/statusline.sh`):
 
 ```bash
 # Re-add the changed file to chezmoi's source
-chezmoi add ~/.claude/statusline.sh
+chezmoi add ~/.claude/statusline.cjs
 chezmoi add ~/.cursor/statusline.sh
 
 # Commit and push
@@ -51,11 +51,11 @@ chezmoi git -- push
 
 ## Status lines
 
-Shared bash scripts (Claude Code, Cursor CLI, Antigravity CLI). Layout matches Claude Code: project/git lines + session info (context bar, tokens). Claude adds ccburn usage limits when installed.
+Shared scripts (Claude Code, Cursor CLI, Antigravity CLI). Layout matches Claude Code: project/git lines + session info (context bar, tokens). Claude's is a Node script (one process per render, which matters on Windows); its context bar fills toward the auto-compact window rather than the full context window, and it adds ccburn usage limits when installed.
 
 | Tool | Script | Config |
 |------|--------|--------|
-| Claude Code | `~/.claude/statusline.sh` | `~/.claude/settings.json` |
+| Claude Code | `~/.claude/statusline.cjs` (needs Node) | `~/.claude/settings.json` |
 | Cursor CLI | `~/.cursor/statusline.sh` | chezmoi `modify_` → `~/.cursor/cli-config.json` |
 | Antigravity CLI | `~/.gemini/antigravity-cli/statusline.sh` | chezmoi `modify_` → `~/.gemini/antigravity-cli/settings.json` |
 | oh-my-pi | — (native, no script) | chezmoi `modify_` → `~/.omp/agent/config.yml` |
